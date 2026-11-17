@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -u
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+PYTHON="$ROOT/.venv/bin/python"
+FAILURES=0
+
+pass() { printf "✓ %s\n" "$1"; }
+warn() { printf "! %s\n" "$1"; }
+fail() { printf "✗ %s\n" "$1"; FAILURES=$((FAILURES + 1)); }
+
+doctor() {
+  local start_judge0="${1:-false}"
+  echo "Agentic AI Workshop setup check"
+  echo
+
+  if [[ "$start_judge0" == "true" ]] && ! curl -fsS http://127.0.0.1:2358/about >/dev/null 2>&1; then
+    "$ROOT/scripts/start-judge0.sh" || fail "Judge0 could not be started"
+    echo
+  fi
+
+  if [[ -x "$PYTHON" ]]; then
+    VERSION="$($PYTHON --version 2>&1)"
+    [[ "$VERSION" == Python\ 3.12.* ]] && pass "$VERSION" || fail "$VERSION — Python 3.12 is required"
+  else
+    fail "Virtual environment missing — run: python3.12 -m venv .venv"
+  fi
+
+  if [[ "${VIRTUAL_ENV:-}" == "$ROOT/.venv" ]]; then
+    pass "Workshop virtual environment active"
+  else
+    warn "Environment is not active — run: source .venv/bin/activate"
+  fi
+
+  if [[ -x "$PYTHON" ]] && "$PYTHON" -c "import ipykernel, jupyterlab, langchain, langgraph, mlflow; import langgraph.checkpoint.sqlite" >/dev/null 2>&1; then
+    pass "Core Python dependencies import correctly"
+  else
+    fail "Dependencies incomplete — run: $PYTHON -m pip install -r requirements.txt"
+  fi
+
+  if curl -fsS http://127.0.0.1:5001/health >/dev/null 2>&1; then
+    pass "MLflow is running at http://127.0.0.1:5001"
+  else
+    fail "MLflow is not running — run: ./workshop start"
+  fi
+
+  if curl -fsS http://127.0.0.1:8317/v1/models -H "Authorization: Bearer 123456" >/dev/null 2>&1; then
+    pass "Workshop model endpoint is reachable"
+  else
+    fail "Model endpoint is unavailable at http://127.0.0.1:8317/v1"
+  fi
+
+  if curl -fsS http://127.0.0.1:5001/gateway/mlflow/v1/chat/completions \
+    -H "Authorization: Bearer not-needed" \
+    -H "Content-Type: application/json" \
+    --data '{"model":"workshop-gemini","messages":[{"role":"user","content":"Reply ready"}],"max_tokens":8}' \
+    >/dev/null 2>&1; then
+    pass "MLflow Gateway returned a model response"
+  else
+    fail "MLflow Gateway is not configured — follow README.md section 3"
+  fi
+
+  if curl -fsS http://127.0.0.1:2358/about >/dev/null 2>&1; then
+    pass "Local Judge0 is running at http://127.0.0.1:2358"
+    if [[ -x "$PYTHON" ]] && "$PYTHON" "$ROOT/scripts/check-judge0.py" >/dev/null 2>&1; then
+      pass "Judge0 executes Python, C++14, and Java 11"
+    else
+      fail "Judge0 language smoke test failed — run: ./workshop judge0-test"
+    fi
+  else
+    fail "Local Judge0 is not running — run: ./workshop judge0-start"
+  fi
+
+  echo
+  if [[ "$FAILURES" -eq 0 ]]; then
+    echo "Ready for the workshop."
+  else
+    echo "$FAILURES required check(s) failed. Fix the first failure, then run ./workshop doctor again."
+  fi
+  return "$FAILURES"
+}
+
+case "${1:-doctor}" in
+  doctor)
+    case "${2:-}" in
+      "") doctor false ;;
+      --start-judge0) doctor true ;;
+      *) echo "Usage: ./workshop doctor [--start-judge0]"; exit 2 ;;
+    esac
+    ;;
+  start) "$ROOT/scripts/start-mlflow.sh" ;;
+  stop) "$ROOT/scripts/stop-mlflow.sh" ;;
+  judge0-start) "$ROOT/scripts/start-judge0.sh" ;;
+  judge0-stop) docker compose -f "$ROOT/judge0/docker-compose.yml" down ;;
+  judge0-logs) docker compose -f "$ROOT/judge0/docker-compose.yml" logs -f ;;
+  judge0-test)
+    if [[ -x "$PYTHON" ]]; then
+      "$PYTHON" "$ROOT/scripts/check-judge0.py"
+    else
+      python3 "$ROOT/scripts/check-judge0.py"
+    fi
+    ;;
+  *)
+    echo "Usage: ./workshop {doctor [--start-judge0]|start|stop|judge0-start|judge0-stop|judge0-logs|judge0-test}"
+    exit 2
+    ;;
+esac
